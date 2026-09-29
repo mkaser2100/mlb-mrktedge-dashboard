@@ -8,13 +8,14 @@ on:
         required: false
         type: string
       bookmakers:
-        description: "Use 'all' for every available sportsbook, or provide a comma-separated allowlist."
+        description: "Use all US books, or provide a comma-separated bookmaker allowlist."
         required: false
         default: "all"
         type: string
 
 # schedule:
-#   # Daily pregame refresh. The loader skips games that already started.
+#   Daily schedule intentionally remains disabled to protect the free API quota.
+#   Re-enable only after reviewing observed credits/run in the job summary.
 #   - cron: "0 14 * * *"
 
 jobs:
@@ -27,13 +28,10 @@ jobs:
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
 
-      SPORT_KEY: baseball_mlb
-      ODDS_MARKET_KEYS: batter_hits,batter_total_bases,batter_home_runs
       ODDS_REGIONS: us
       BOOKMAKERS: ${{ inputs.bookmakers || 'all' }}
       ODDS_TARGET_DATE: ${{ inputs.target_date || '' }}
       MAX_EVENTS_PER_RUN: 20
-      SKIP_STARTED_GAMES: "true"
 
     steps:
       - name: Checkout repository
@@ -51,56 +49,45 @@ jobs:
 
       - name: Verify configuration
         run: |
-          echo "Sport: $SPORT_KEY"
-          echo "Batter markets: $ODDS_MARKET_KEYS"
-          echo "Regions: $ODDS_REGIONS"
-          echo "Books: $BOOKMAKERS"
+          echo "Provider: The Odds API"
           echo "Target Date: ${ODDS_TARGET_DATE:-today Eastern}"
+          echo "Books: $BOOKMAKERS"
           echo "Max Events: $MAX_EVENTS_PER_RUN"
-          echo "Skip Started Games: $SKIP_STARTED_GAMES"
+          echo "Optimization: prediction-aware markets + one event fetch + combined event odds"
 
-      - name: Load MLB Batter Prop Market Odds
-        id: batter_prop_odds
-        continue-on-error: true
-        run: python scripts/load_hit_prop_market_odds.py
+      - name: Compile optimized loader
+        run: python -m py_compile scripts/load_mlb_market_odds.py
 
-      - name: Load MLB Pitcher Strikeout Market Odds
-        id: pitcher_k_odds
-        continue-on-error: true
-        run: python scripts/load_pitcher_k_market_odds.py
+      - name: Load MLB market odds
+        id: market_odds
+        run: |
+          set -euo pipefail
+          python scripts/load_mlb_market_odds.py | tee market-odds-loader.log
 
-      - name: Validate market odds loaders
+      - name: Write job summary
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-
-          batter_outcome="${{ steps.batter_prop_odds.outcome }}"
-          pitcher_k_outcome="${{ steps.pitcher_k_odds.outcome }}"
-
-          echo "Batter prop odds loader outcome: ${batter_outcome}"
-          echo "Pitcher K odds loader outcome: ${pitcher_k_outcome}"
-
           {
-            echo "## MLB Market Odds Loader Status"
-            echo ""
-            echo "| Loader | Outcome |"
-            echo "|---|---|"
-            echo "| Batter Hits / 2+ TB / Home Run | ${batter_outcome} |"
-            echo "| Pitcher Strikeouts | ${pitcher_k_outcome} |"
+            echo "## MLB Market Odds Loader"
+            echo
+            echo "- Loader: \`scripts/load_mlb_market_odds.py\`"
+            echo "- Event list fetched once"
+            echo "- Only games with model predictions are queried"
+            echo "- Only markets required by each game's predictions are queried"
+            echo "- Batter + Pitcher-K markets share one event-odds request"
+            echo "- Books: all US books by default; restricting books is optional, not treated as a quota-saving mechanism"
+            echo
+            echo "### Provider usage"
+            echo '```'
+            grep -A 8 "Odds API usage:" market-odds-loader.log 2>/dev/null || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ "${batter_outcome}" != "success" || "${pitcher_k_outcome}" != "success" ]]; then
-            echo "One or more market odds loaders failed."
-            exit 1
-          fi
 
       - name: Upload loader log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mlb-market-odds-loader-log-${{ github.run_id }}
-          path: |
-            *.log
-            logs/**
+          path: market-odds-loader.log
           if-no-files-found: ignore
