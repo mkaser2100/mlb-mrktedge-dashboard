@@ -8,14 +8,13 @@ on:
         required: false
         type: string
       bookmakers:
-        description: "Use all US books, or provide a comma-separated bookmaker allowlist."
+        description: "Fallback provider only: all US books, or comma-separated allowlist."
         required: false
         default: "all"
         type: string
 
 # schedule:
-#   Daily schedule intentionally remains disabled to protect the free API quota.
-#   Re-enable only after reviewing observed credits/run in the job summary.
+#   Daily schedule intentionally remains disabled until Oddize is validated on a live MLB slate.
 #   - cron: "0 14 * * *"
 
 jobs:
@@ -26,8 +25,8 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ODDIZE_API_KEY: ${{ secrets.ODDIZE_API_KEY }}
       THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
-
       ODDS_REGIONS: us
       BOOKMAKERS: ${{ inputs.bookmakers || 'all' }}
       ODDS_TARGET_DATE: ${{ inputs.target_date || '' }}
@@ -49,20 +48,22 @@ jobs:
 
       - name: Verify configuration
         run: |
-          echo "Provider: The Odds API"
+          echo "Primary provider: Oddize"
+          echo "Fallback provider: The Odds API"
           echo "Target Date: ${ODDS_TARGET_DATE:-today Eastern}"
-          echo "Books: $BOOKMAKERS"
-          echo "Max Events: $MAX_EVENTS_PER_RUN"
-          echo "Optimization: prediction-aware markets + one event fetch + combined event odds"
+          echo "Fallback books: $BOOKMAKERS"
+          echo "Oddize optimization: sport-level props; only model-required markets requested"
 
-      - name: Compile optimized loader
-        run: python -m py_compile scripts/load_mlb_market_odds.py
+      - name: Compile loaders
+        run: |
+          python -m py_compile scripts/load_mlb_market_odds.py
+          python -m py_compile scripts/load_mlb_market_odds_oddize.py
 
       - name: Load MLB market odds
         id: market_odds
         run: |
           set -euo pipefail
-          python scripts/load_mlb_market_odds.py | tee market-odds-loader.log
+          python scripts/load_mlb_market_odds_oddize.py |& tee market-odds-loader.log
 
       - name: Write job summary
         if: always()
@@ -71,16 +72,15 @@ jobs:
           {
             echo "## MLB Market Odds Loader"
             echo
-            echo "- Loader: \`scripts/load_mlb_market_odds.py\`"
-            echo "- Event list fetched once"
-            echo "- Only games with model predictions are queried"
-            echo "- Only markets required by each game's predictions are queried"
-            echo "- Batter + Pitcher-K markets share one event-odds request"
-            echo "- Books: all US books by default; restricting books is optional, not treated as a quota-saving mechanism"
+            echo "- Primary: **Oddize**"
+            echo "- Fallback: **The Odds API**"
+            echo "- Oddize is queried only for prop markets required by model predictions"
+            echo "- Existing Supabase market tables/views remain unchanged"
+            echo "- Existing The Odds API loader remains intact and is invoked automatically if Oddize fails validation"
             echo
-            echo "### Provider usage"
+            echo "### Provider usage / fallback status"
             echo '```'
-            grep -A 8 "Odds API usage:" market-odds-loader.log 2>/dev/null || true
+            grep -E -A 6 "Oddize API usage:|Odds API usage:|FALLBACK ACTIVATED" market-odds-loader.log 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
