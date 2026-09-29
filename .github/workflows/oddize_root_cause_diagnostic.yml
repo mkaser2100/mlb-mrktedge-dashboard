@@ -1,0 +1,67 @@
+name: Oddize MLB Root Cause Diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Diagnose Oddize MLB API
+        env:
+          ODDIZE_API_KEY: ${{ secrets.ODDIZE_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, urllib.parse, urllib.request, urllib.error
+          BASE="https://oddize.com/api/v1"
+          KEY=os.environ.get("ODDIZE_API_KEY")
+          if not KEY: raise SystemExit("FAIL: ODDIZE_API_KEY secret is missing")
+          credits=0
+          def call(path, params=None):
+              global credits
+              qs=urllib.parse.urlencode(params or {})
+              url=BASE+path+("?" + qs if qs else "")
+              print("\nGET", path+("?" + qs if qs else ""))
+              req=urllib.request.Request(url,headers={"X-API-Key":KEY,"Accept":"application/json","User-Agent":"mlb-root-cause/1.0"})
+              try:
+                  with urllib.request.urlopen(req,timeout=30) as r:
+                      h={k.lower():v for k,v in r.headers.items()}
+                      cost=int(h.get("x-credits-cost") or 0); credits+=cost
+                      print("HTTP:",r.status,"| cost:",cost,"| remaining:",h.get("x-credits-remaining"))
+                      return json.loads(r.read().decode())
+              except urllib.error.HTTPError as e:
+                  print("HTTP ERROR",e.code,e.read().decode(errors="replace")[:2000]); return None
+          def show(label,d,n=12000):
+              print("\n---",label,"---")
+              if d is None: print("No JSON response"); return
+              print(json.dumps(d,indent=2)[:n])
+
+          print("=== ODDIZE MLB ROOT CAUSE DIAGNOSTIC ===")
+          sports=call("/sports"); show("SPORTS",sports,6000)
+          offers=call("/offer-types"); show("OFFER TYPES",offers,12000)
+
+          latest=call("/odds/latest",{"sport":"mlb","limit":100})
+          show("LATEST MLB ODDS",latest,15000)
+          events=latest.get("events",[]) if isinstance(latest,dict) else []
+          print("\nLATEST EVENT COUNT:",len(events))
+
+          if events:
+              event_id=events[0].get("event_id")
+              print("SELECTED EVENT ID:",event_id)
+              if event_id:
+                  event_props=call("/events/mlb/"+urllib.parse.quote(str(event_id),safe="")+"/props")
+                  show("EVENT-SPECIFIC PROPS",event_props,20000)
+          else:
+              print("No latest MLB event available; skipping event-specific props call.")
+
+          aggregate=call("/props/mlb",{"prop_type":"batter_h"})
+          show("AGGREGATE batter_h PROPS",aggregate,15000)
+
+          print("\n=== SUMMARY ===")
+          print("Credits consumed:",credits)
+          print("latest MLB events:",len(events))
+          print("=== COMPLETE ===")
+          PY
