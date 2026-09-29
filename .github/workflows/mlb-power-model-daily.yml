@@ -207,6 +207,7 @@ jobs:
         run: python -m py_compile scripts/score_mlb_power_models.py
 
       - name: Refresh and validate Phase 1 power features
+        id: phase1
         if: ${{ steps.gate.outputs.should_run == 'true' }}
         shell: bash
         run: |
@@ -225,6 +226,7 @@ jobs:
           max_attempts = 4
           sleep_seconds = 90
           last_problem = "not attempted"
+          no_games = False
 
           for attempt in range(1, max_attempts + 1):
               print(
@@ -297,6 +299,22 @@ jobs:
                       f"missing_sides={missing_sides}"
                   )
 
+                  # A true off-day is a valid no-op, not a pipeline failure.
+                  # Requiring every population count to be zero prevents this
+                  # guard from masking partial/missing feature coverage.
+                  if (
+                      row_count == 0
+                      and eligible_sides == 0
+                      and represented_sides == 0
+                      and missing_sides == 0
+                  ):
+                      no_games = True
+                      print(
+                          f"No eligible MLB games for {run_date}; "
+                          "Power Models will exit successfully without scoring."
+                      )
+                      break
+
                   if missing_environment_rows > 0:
                       print(
                           f"Info: {missing_environment_rows} feature rows have no "
@@ -339,10 +357,13 @@ jobs:
                       f"Phase 1 power features were not ready after "
                       f"{max_attempts} attempts for {run_date}: {last_problem}"
                   )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"no_games={'true' if no_games else 'false'}\n")
           PY
 
       - name: Score shadow models
-        if: ${{ steps.gate.outputs.should_run == 'true' }}
+        if: ${{ steps.gate.outputs.should_run == 'true' && steps.phase1.outputs.no_games != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -368,7 +389,7 @@ jobs:
           python scripts/score_mlb_power_models.py "${ARGS[@]}"
 
       - name: Refresh batter prediction board cache
-        if: ${{ steps.gate.outputs.should_run == 'true' && inputs.dry_run != true }}
+        if: ${{ steps.gate.outputs.should_run == 'true' && steps.phase1.outputs.no_games != 'true' && inputs.dry_run != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -397,7 +418,7 @@ jobs:
           PY
 
       - name: Validate HR and Total Bases cache freshness
-        if: ${{ steps.gate.outputs.should_run == 'true' && inputs.dry_run != true }}
+        if: ${{ steps.gate.outputs.should_run == 'true' && steps.phase1.outputs.no_games != 'true' && inputs.dry_run != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -455,9 +476,11 @@ jobs:
             echo "- Trigger: \`${{ github.event_name }}\`"
             echo "- Run date: \`${{ steps.gate.outputs.run_date || inputs.run_date || 'today ET' }}\`"
             echo "- Gate decision: \`${{ steps.gate.outputs.should_run || 'not evaluated' }}\`"
+            echo "- No-games decision: \`${{ steps.phase1.outputs.no_games || 'not evaluated' }}\`"
             echo "- Primary dependency: \`Refresh MLB V3 Features\`"
             echo "- Existing-complete overwrite protection: \`enabled\`"
             echo "- Automatic late-recovery path: \`enabled and audited\`"
-            echo "- Phase 1 feature retries: \`4 x 90s\`"
+            echo "- No-games guard: \`enabled; zero population exits successfully\`"
+            echo "- Phase 1 feature retries: \`4 x 90s when games are expected\`"
             echo "- Fallback schedules: \`12:37, 13:07, 13:37 UTC\`"
           } >> "$GITHUB_STEP_SUMMARY"

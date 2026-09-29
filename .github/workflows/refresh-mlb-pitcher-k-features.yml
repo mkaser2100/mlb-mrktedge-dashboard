@@ -54,7 +54,72 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check for eligible MLB games
+        id: game_gate
+        shell: bash
+        env:
+          INPUT_GAME_DATE: ${{ inputs.game_date }}
+          INPUT_BACKFILL: ${{ inputs.backfill }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import datetime as dt
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from zoneinfo import ZoneInfo
+
+          # Backfills intentionally operate over historical ranges and should
+          # always continue into the existing backfill logic.
+          if "${{ inputs.backfill || false }}" == "true":
+              has_games = True
+              run_date = "${{ inputs.game_date || 'backfill' }}"
+          else:
+              requested = "${{ inputs.game_date || '' }}".strip()
+              run_date = requested or dt.datetime.now(
+                  ZoneInfo("America/New_York")
+              ).date().isoformat()
+
+              params = urllib.parse.urlencode({
+                  "select": "game_pk",
+                  "game_date": f"eq.{run_date}",
+                  "limit": "1",
+              })
+              url = (
+                  os.environ["SUPABASE_URL"].rstrip("/")
+                  + "/rest/v1/v_mlb_prediction_eligible_games?"
+                  + params
+              )
+              key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "apikey": key,
+                      "Authorization": f"Bearer {key}",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  rows = json.loads(response.read().decode("utf-8"))
+              has_games = bool(rows)
+
+          print(
+              f"Pitcher-K game gate | date={run_date} | "
+              f"eligible_games={'yes' if has_games else 'no'}"
+          )
+          if not has_games:
+              print(
+                  f"No eligible MLB games for {run_date}; "
+                  "Pitcher-K feature refresh is a successful no-op."
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"has_games={'true' if has_games else 'false'}\n")
+              fh.write(f"run_date={run_date}\n")
+          PY
+
       - name: Refresh pitcher K features
+        if: ${{ steps.game_gate.outputs.has_games == 'true' }}
         shell: bash
         env:
           INPUT_GAME_DATE: ${{ inputs.game_date }}
@@ -96,6 +161,6 @@ jobs:
             printf '%s\n' "- Backfill: ${SUMMARY_BACKFILL}"
             echo '- Feature table: mlb_ml_pitcher_k_features_daily'
             echo '- Orchestration: master pipeline dependency'
-            echo '- Starter-context retry guard: enabled (8 attempts / 30 seconds)'
+            echo '- No-games guard: enabled; zero eligible games exit successfully'\n            echo '- Starter-context retry guard: enabled (8 attempts / 30 seconds when games are expected)'
             echo '- Post-refresh validation: enabled'
           } >> "$GITHUB_STEP_SUMMARY"
