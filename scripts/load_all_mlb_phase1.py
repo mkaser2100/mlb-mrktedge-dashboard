@@ -154,7 +154,6 @@ def dedupe_rows_by_conflict(rows: List[Dict[str, Any]], on_conflict: Optional[st
     return list(deduped.values()) + missing_key_rows
 
 
-
 def strip_null_handedness_fields(table: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Supabase upsert updates columns explicitly set to null.
@@ -312,7 +311,6 @@ def load_daily_team_matchups(client, season: int, date_text: str, sleep: float, 
     return sorted(set(pitcher_ids))
 
 
-
 def sync_reds_daily_matchups(client) -> None:
     """
     Keep the legacy Reds matchup table populated from the all-MLB team matchup table.
@@ -354,7 +352,7 @@ def sync_reds_daily_matchups(client) -> None:
 
 
 def load_batting_game_logs(client, season: int, start_date: dt.date, end_date: dt.date, sleep: float) -> None:
-    data = api_get("/schedule", {"sportId": SPORT_ID, "startDate": start_date.isoformat(), "endDate": end_date.isoformat(), "gameTypes": "R"}, sleep)
+    data = api_get("/schedule", {"sportId": SPORT_ID, "startDate": start_date.isoformat(), "endDate": end_date.isoformat(), "gameTypes": "R,F,D,L,W"}, sleep)
     games = []
     for day in data.get("dates", []):
         official_date = day.get("date")
@@ -397,7 +395,6 @@ def load_batting_game_logs(client, season: int, start_date: dt.date, end_date: d
     # Boxscore rows intentionally omit bats/throws so they do not overwrite roster/person handedness.
     upsert_rows(client, "mlb_players", list(player_rows.values()), on_conflict="player_id")
     upsert_rows(client, "mlb_player_batting_game_logs", rows, on_conflict="player_id,game_pk")
-
 
 def load_hitter_splits(client, hitters: List[Dict[str, Any]], season: int, sleep: float, max_hitters: int = 0) -> None:
     sit_map = {"vl": ("pitcher_hand", "LHP"), "vr": ("pitcher_hand", "RHP"), "h": ("venue", "home"), "a": ("venue", "away"), "d": ("time_of_day", "day"), "n": ("time_of_day", "night")}
