@@ -55,20 +55,6 @@ on:
         default: false
         type: boolean
 
-  # PRIMARY TRIGGER: run as soon as the current-day V3 feature refresh finishes.
-  # This removes GitHub cron latency from the critical path.
-  workflow_run:
-    workflows:
-      - "Refresh MLB V3 Features"
-    types: [completed]
-
-  # REDUNDANT FALLBACKS.
-  # During EDT these target 8:37 AM, 9:07 AM, and 9:37 AM Eastern.
-  schedule:
-    - cron: "37 12 * * *"
-    - cron: "7 13 * * *"
-    - cron: "37 13 * * *"
-
 concurrency:
   group: mlb-power-model-daily-${{ inputs.run_date || 'today' }}
   cancel-in-progress: false
