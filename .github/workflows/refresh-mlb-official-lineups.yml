@@ -2,11 +2,6 @@ name: Refresh MLB Official Lineups
 
 on:
   workflow_dispatch:
-    # Roughly 10:15 AM-9:15 PM Eastern during EDT; script always uses ET date.
-    # Removed the final 10:15 PM ET run because games are typically complete by then.
-    - cron: "15 14-23 * * *"
-    - cron: "15 0-1 * * *"
-  workflow_dispatch:
     inputs:
       game_date:
         description: "YYYY-MM-DD; blank = today ET"
