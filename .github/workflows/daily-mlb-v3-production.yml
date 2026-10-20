@@ -11,8 +11,6 @@ on:
         description: "Optional actuals date YYYY-MM-DD. Blank defaults to yesterday ET."
         required: false
         type: string
-  schedule:
-    - cron: "45 10 * * *"
 
 concurrency:
   group: daily-mlb-v3-production
