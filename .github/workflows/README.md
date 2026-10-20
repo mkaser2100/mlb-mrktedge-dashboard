@@ -1,14 +1,53 @@
-# MLB V3 Daily Production Workflow
+# MLB GitHub Actions — Production Workflows and Schedule Inventory
 
-This document describes the production workflow order for the MLB V3 Hit Model pipeline and the operating rules for running, troubleshooting, and maintaining it.
+**Audit date:** October 20, 2026  
+**Repository:** `mkaser2100/mlb-mrktedge-dashboard`  
+**Scope:** All 16 `.yml` files in `.github/workflows/` on `main`.  
+**Purpose:** Record every automatic trigger, preserve offseason shutdown/restart instructions, and document the V3 production dependency chain.
 
-## Production Workflow Order
+> **Source of truth:** The YAML files on the default branch determine what GitHub Actions actually schedules. This README is an audited snapshot, not an automatic live status monitor. An active YAML schedule may still be disabled at the GitHub Actions UI level. GitHub Actions cron uses UTC and may be delayed.
 
-The production pipeline is orchestrated by:
+## 1. Automatic schedule inventory
 
-`.github/workflows/daily-mlb-v3-production.yml`
+| Workflow file | Automatic trigger(s) in YAML | UTC cron | Eastern time in EDT (UTC−4) | Eastern time in EST (UTC−5) | Audit status |
+|---|---|---|---|---|---|
+| `daily-mlb-v3-production.yml` | `schedule` | `45 10 * * *` | **6:45 AM daily** | **5:45 AM daily** | **Cron enabled** |
+| `mlb-power-model-daily.yml` | `schedule` + `workflow_run` | `37 12 * * *` / `7 13 * * *` / `37 13 * * *` | **8:37, 9:07, 9:37 AM daily** | **7:37, 8:07, 8:37 AM daily** | **Cron + event trigger enabled** |
+| `refresh-mlb-official-lineups.yml` | None (manual only) | — | — | — | **Automatic scheduling off** |
+| `load-mlb-market-odds.yml` | None (manual only); commented-out example `0 14 * * *` | — | — | — | **Automatic scheduling off** |
 
-It is the **only automatic scheduler/orchestrator for the V3 production chain**.
+**Important:** The three Power Models cron expressions are redundant fallback opportunities, not necessarily three scoring executions: the workflow contains a status/readiness gate. It also has a separate `workflow_run` trigger on completion of `Refresh MLB V3 Features`. The gate can skip work, but the workflow can still be invoked automatically.
+
+**Time-zone warning:** The existing cron expressions are fixed UTC values; they **do not automatically adjust** for US daylight saving time. The EST column shows what the same cron expressions mean in winter. No active cron in the audited files specifies a season-only date restriction.
+
+## 2. Complete inventory of all 16 workflow files
+
+| Workflow file | Direct `schedule` | Other automatic trigger | Manual `workflow_dispatch` | Reusable `workflow_call` | Operational note |
+|---|---|---|---|---|---|
+| `daily-mlb-v3-production.yml` | **Yes** | No | Yes | No | Master production orchestrator; calls child workflows |
+| `daily-reds-batting.yml` | No | No | Yes | No | Retired stub; do not schedule |
+| `load-all-mlb-phase-1.yml` | No | No | Yes | Yes | Child of master pipeline |
+| `load-mlb-market-odds.yml` | No | No | Yes | No | Schedule commented out pending live Oddize validation |
+| `load-mlb-pitcher-k-actuals.yml` | No | No | Yes | Yes | Callable/manual; no independent schedule |
+| `load-mlb-statcast.yml` | No | No | Yes | Yes | Child of master pipeline |
+| `load-v3-hit-actuals.yml` | No | No | Yes | Yes | Child of master pipeline |
+| `mlb-power-model-daily.yml` | **Yes** | **Yes: `workflow_run`** | Yes | Yes | HR + total-bases shadow scoring; has 3 fallback crons |
+| `pitcher-k-phase2-research.yml` | No | No | Yes | No | Manual research |
+| `pitcher-k-phase3-train.yml` | No | No | Yes | No | Manual training/validation |
+| `refresh-mlb-hit-board-performance.yml` | No | No | Yes | Yes | Child of master pipeline |
+| `refresh-mlb-official-lineups.yml` | No | No | Yes | No | Manual only; its former hourly schedule has been removed |
+| `refresh-mlb-pitcher-k-features.yml` | No | No | Yes | Yes | Callable/manual |
+| `refresh-mlb-v3-features.yml` | No | No | Yes | Yes | Child of master pipeline; completion can trigger Power Models |
+| `run-v3-hit-model-model.yml` | No | No | Yes | Yes | Child of master pipeline |
+| `score-mlb-pitcher-k.yml` | No | No | Yes | Yes | Callable/manual |
+
+**Scope note:** `workflow_call` means another workflow may invoke a file automatically as part of a parent run; it does **not** mean that file independently has a cron. This audit identifies triggers declared in workflow YAML, not GitHub Actions UI enablement, external API dispatches, or other repositories.
+
+## 3. V3 production pipeline and dependencies
+
+The authoritative V3 production entry point is:
+
+`daily-mlb-v3-production.yml`
 
 ```text
 Load All MLB Phase 1
@@ -30,364 +69,129 @@ Refresh MLB V3 Features
  Refresh MLB Hit Board Performance
 ```
 
-In dependency form:
+This is the core V3 chain documented in the original README. The master workflow also includes HR/total-bases actuals work; the workflow YAML is authoritative for its full job graph.
 
-```text
-Phase 1
-  ├──> Statcast ──> V3 Features ──┐
-  │                               ├──> V3 Model ──> Performance
-  └──> V3 Actuals ────────────────┘
-```
+The V3 model must not run until both V3 Actuals and V3 Features succeed. GitHub Actions `needs:` dependencies enforce order. A failed prerequisite should block dependent jobs. Do not restore independent `schedule` or `workflow_run` triggers to the V3 child workflows.
 
-## Why the Pipeline Was Changed
+**Production principle:** One master V3 scheduler, one dependency graph, and one authoritative production result. The separate Power Models workflow is an additional scheduled/event-driven pipeline and must be managed separately during offseason shutdown.
 
-Previously, several workflows used independent `schedule` and `workflow_run` triggers.
+## 4. Offseason shutdown procedure
 
-The V3 workflow could therefore wake when **either** V3 Actuals or V3 Features completed. A JavaScript readiness gate then checked whether both prerequisites were ready.
+**Goal:** Stop recurring MLB-related compute while keeping manual runs and the code available for the next season.
 
-That design created misleading runs:
+### A. Stop the master V3 pipeline
 
-- A prerequisite could finish before the other.
-- `Run V3 Hit Model` would wake too early.
-- The readiness gate would correctly skip the actual model job.
-- The parent workflow could still appear successful/green.
-- Downstream Performance could interpret that green parent workflow as a successful model run.
-
-The new architecture removes that event-driven race condition.
-
-GitHub Actions now enforces the production order directly through `needs:` dependencies.
-
-## Critical V3 Dependency
-
-The V3 model must not run until **both** prerequisite branches have completed successfully:
+In `.github/workflows/daily-mlb-v3-production.yml`, remove or comment out this top-level trigger:
 
 ```yaml
-v3_model:
-  needs: [actuals, features]
+  schedule:
+    - cron: "45 10 * * *"
 ```
 
-This means:
+Keep `workflow_dispatch:` and all jobs. This stops the master's daily cron and, consequently, its automatically invoked child chain. It does not prevent a deliberate manual run.
 
-- V3 Actuals must finish.
-- V3 Features must finish.
-- If either fails, V3 does not run.
-- Performance cannot run unless V3 itself succeeds.
+### B. Stop Power Models completely
 
-## Workflow Responsibilities
-
-### 1. Load All MLB Phase 1
-
-Primary upstream MLB data load.
-
-This workflow feeds both branches of the V3 pipeline.
-
-Production behavior:
-
-- Runs first in the master pipeline.
-- Must complete successfully before Statcast or Actuals starts.
-- Remains manually runnable through `workflow_dispatch`.
-- Is reusable through `workflow_call`.
-- Does not independently schedule the V3 production chain.
-
-### 2. Load MLB Statcast
-
-Loads the Statcast data needed by the V3 feature pipeline.
-
-Dependency:
-
-```text
-Phase 1 -> Statcast
-```
-
-Production behavior:
-
-- Starts only after Phase 1 succeeds.
-- Allows a legitimate MLB-wide off day to complete without incorrectly failing the production pipeline.
-- Remains manually runnable for troubleshooting/backfills.
-
-### 3. Load V3 Hit Actuals
-
-Closes/evaluates the prior prediction day.
-
-Dependency:
-
-```text
-Phase 1 -> V3 Actuals
-```
-
-Important behavior:
-
-- Normally targets the prior Eastern-date prediction run.
-- If a prior date had eligible games but no legitimate V3 prediction run, it classifies that date as a missing V3 prediction day and does not fabricate historical predictions.
-- A missing prior V3 run must not deadlock today's production model.
-- Explicit historical/manual actuals requests remain strict.
-
-### 4. Refresh MLB V3 Features
-
-Builds/refreshes the current-date feature source required for V3 scoring.
-
-Dependency:
-
-```text
-Phase 1 -> Statcast -> V3 Features
-```
-
-Important behavior:
-
-- Must successfully finish before V3 scoring begins.
-- Existing feature-refresh locking/retry/polling logic remains in place.
-- The workflow no longer independently wakes V3.
-
-### 5. Run V3 Hit Model
-
-Trains/scores the V3 `hit_1plus` model and publishes the official current-date predictions.
-
-Dependencies:
-
-```text
-V3 Actuals ----\
-                > Run V3 Hit Model
-V3 Features ---/
-```
-
-The model workflow retains its internal defensive validations, including:
-
-- Previous V3 actuals validation
-- Current V3 feature-source validation
-- Training/scoring
-- Prediction validation
-- Official run activation
-- Model-agnostic feature-contribution validation
-- Player drawer explanation refresh/validation
-- V3 hit-board serving-cache publication
-
-These checks are **data-integrity safeguards**, not workflow orchestration.
-
-The old `once-daily-gate`, prerequisite workflow-history lookup, independent schedule, and `workflow_run` triggers are no longer needed in this workflow.
-
-### 6. Refresh MLB Hit Board Performance
-
-Runs only after the actual V3 model workflow succeeds.
-
-Dependency:
-
-```text
-V3 Model -> Performance
-```
-
-This prevents Performance from running merely because a V3 parent workflow appeared green while the model job itself was skipped.
-
-## Automatic vs. Manual Runs
-
-### Automatic production
-
-Use:
-
-`Daily MLB V3 Production Pipeline`
-
-This is the authoritative production path.
-
-Do not add separate automatic schedules or `workflow_run` triggers back to the child workflows.
-
-### Manual troubleshooting
-
-Individual child workflows retain `workflow_dispatch`.
-
-They may be run manually when:
-
-- troubleshooting a specific stage
-- testing a fix
-- intentionally refreshing data
-- performing a supported backfill
-
-A manual child run does **not** replace the dependency guarantees of the master production pipeline.
-
-## Reusable Workflows
-
-The child workflows expose `workflow_call` so the master pipeline can call them directly.
-
-The master workflow should call the local workflow files using:
+In `.github/workflows/mlb-power-model-daily.yml`, remove or comment out **both** automatic trigger sections:
 
 ```yaml
-uses: ./.github/workflows/<workflow-file>.yml
-secrets: inherit
+  workflow_run:
+    workflows:
+      - "Refresh MLB V3 Features"
+    types: [completed]
+
+  schedule:
+    - cron: "37 12 * * *"
+    - cron: "7 13 * * *"
+    - cron: "37 13 * * *"
 ```
 
-The master workflow owns the production dependency graph.
+**Why both?** If `workflow_run` remains, a successful or completed V3 feature refresh can still launch the Power Models workflow even after all its crons are removed. Keep `workflow_dispatch:` and `workflow_call:` if manual and reusable operation should remain available.
 
-## Concurrency
+### C. Leave the already-disabled schedules off
 
-Keep concurrency protection on workflows that can perform expensive or conflicting writes.
+- `refresh-mlb-official-lineups.yml` is currently manual only. No change required.
+- `load-mlb-market-odds.yml` has only a **commented-out** cron example; leave it commented out unless separately validated and approved.
+- No other file in the audited folder has an independent active cron.
 
-The goal is:
+### D. Verify shutdown
 
-- no overlapping production pipelines
-- no duplicate feature refresh ownership
-- no competing V3 scoring runs
-- no duplicate serving-cache refreshes
+1. Commit the changes to `main`.
+2. Reopen both workflow YAML files on `main`; verify neither contains an active top-level `schedule:`. Verify Power Models also has no active `workflow_run:`.
+3. Confirm `workflow_dispatch:` remains available in GitHub **Actions** for both workflows.
+4. Review GitHub Actions run history after the next former scheduled time. No new `schedule` runs should be created for these two workflows; pre-existing queued or running jobs may still need attention.
+5. Check for external triggers, manually invoked parent workflows, and any other repositories if activity continues. YAML edits alone do not stop external dispatches or manually initiated work.
 
-The master pipeline should use a production-level concurrency group such as:
+**Do not disable the entire workflow in the GitHub UI if the goal is to preserve manual execution.** Removing only automatic triggers is preferable for this use case.
+
+## 5. Next-season restart procedure
+
+1. Decide whether to retain the same UTC cron times. For desired fixed Eastern times across DST changes, adjust the schedule seasonally or implement an appropriate time-zone-aware strategy; GitHub cron alone does not follow Eastern DST.
+2. Restore the original `schedule` block in `daily-mlb-v3-production.yml`:
 
 ```yaml
-concurrency:
-  group: daily-mlb-v3-production
-  cancel-in-progress: false
+  schedule:
+    - cron: "45 10 * * *"
 ```
 
-## Interpreting Pipeline Status
-
-With the new architecture, the master workflow is the primary health signal.
-
-### Green master pipeline
-
-A green production run should mean the required chain completed successfully:
-
-```text
-Phase 1
-Statcast
-V3 Actuals
-V3 Features
-V3 Model
-Performance
-```
-
-### Red master pipeline
-
-A failed stage should block its dependent stages.
-
-Examples:
-
-```text
-Statcast fails
-   ↓
-Features blocked
-   ↓
-V3 blocked
-   ↓
-Performance blocked
-```
-
-or:
-
-```text
-Actuals fails
-   ↓
-V3 blocked
-   ↓
-Performance blocked
-```
-
-A blocked downstream job is expected behavior when its prerequisite failed.
-
-## MLB Off Days
-
-A legitimate no-game day should not be treated the same as a broken data pipeline.
-
-Existing scripts and database status checks should distinguish:
-
-- `no_eligible_games`
-- missing/stale required data
-- missing historical V3 prediction run
-- infrastructure/query failure
-
-Do not create fake predictions simply to make an off-day or missed historical run appear complete.
-
-## Data Integrity Rules
-
-The production chain should continue to fail loudly when current-date required data is unexpectedly missing.
-
-Examples:
-
-- eligible games exist but current V3 features are absent
-- model finishes but writes zero predictions
-- activation produces zero active rows
-- feature-contribution coverage is below the required threshold
-- drawer explanations are incomplete
-- serving cache is not ready for the target date
-
-The master DAG fixes **ordering**. It should not weaken these validations.
-
-## Expected Daily Validation
-
-After a successful V3 production run, verify that:
-
-- the daily pipeline status is complete
-- current-date V3 feature rows exist
-- current-date V3 prediction rows exist
-- exactly one official V3 model run is active
-- active predictions cover the expected games
-- the Top 25 contains exactly 25 rows when at least 25 eligible predictions exist
-- duplicate matchup keys are zero
-- serving cache is ready for the current prediction date
-- Performance refresh completed after V3
-
-## Important Maintenance Rule
-
-**Do not reintroduce orchestration into the child workflows.**
-
-Avoid adding:
+3. Restore the original Power Models fallback schedule **only if still needed**:
 
 ```yaml
-workflow_run:
+  schedule:
+    - cron: "37 12 * * *"
+    - cron: "7 13 * * *"
+    - cron: "37 13 * * *"
 ```
 
-or independent production:
+4. Decide explicitly whether to restore the Power Models `workflow_run` trigger:
 
 ```yaml
-schedule:
+  workflow_run:
+    workflows:
+      - "Refresh MLB V3 Features"
+    types: [completed]
 ```
 
-triggers to:
+5. Commit to `main`, verify the triggers in YAML, and check that workflows are enabled in GitHub Actions.
+6. Before relying on automation, manually validate Phase 1, Statcast, V3 Features, V3 Actuals, V3 predictions, serving cache, and Power Models outputs for a live eligible game day. Check secrets, APIs, year-specific settings, model readiness, and any season-specific data assumptions.
+7. Observe the first scheduled production day, inspect the **first failed job** if there is an error, and verify downstream dependencies and data integrity.
+8. Re-audit all workflow files for new or changed schedules and update this inventory.
 
-- Load V3 Hit Actuals
-- Refresh MLB V3 Features
-- Run V3 Hit Model
-- Refresh MLB Hit Board Performance
+**Restart checklist**
 
-The master workflow owns their order.
+- [ ] Confirm desired first production date and Eastern start times
+- [ ] Restore master V3 cron
+- [ ] Restore Power Models fallback crons if required
+- [ ] Decide whether Power Models `workflow_run` should be enabled
+- [ ] Leave Official Lineups manual unless its hourly refresh is intentionally needed
+- [ ] Keep Market Odds schedule disabled until validated
+- [ ] Validate manual end-to-end run and data quality
+- [ ] Confirm first scheduled run and update this README
 
-If timing changes are needed, change the master workflow rather than creating competing schedules.
+## 6. Historical official-lineups schedule (reference only)
 
-## Troubleshooting Order
+The previously removed `refresh-mlb-official-lineups.yml` automatic schedule was:
 
-When the production pipeline fails, inspect the **first failed job**, not the downstream skipped jobs.
-
-Recommended order:
-
-```text
-1. Phase 1
-2. Statcast / Actuals
-3. Features
-4. V3 Model
-5. Performance
+```yaml
+  schedule:
+    - cron: "15 14-23 * * *"
+    - cron: "15 0-1 * * *"
 ```
 
-For V3 specifically, verify:
+These UTC expressions ran at **10:15 AM through 9:15 PM EDT, hourly** (12 opportunities). They are **not currently active**. If you reintroduce them, check for changes to confirmed-lineup availability, overlapping scoring jobs, daylight saving time, and game start times before enabling them.
 
-```text
-eligible games
-    ↓
-current V3 features
-    ↓
-model run
-    ↓
-active predictions
-    ↓
-feature contributions
-    ↓
-drawer explanations
-    ↓
-serving cache
-```
+## 7. Troubleshooting and integrity rules
 
-## Design Principle
+- Inspect the first failed upstream stage rather than downstream skipped jobs.
+- V3 sequence: Phase 1 → Statcast and Actuals → Features → V3 Model → Performance.
+- A legitimate MLB off-day must be distinguished from stale or missing data; do not fabricate predictions.
+- Eligible games with missing features or zero predictions should fail loudly.
+- Validate official model activation, expected game coverage, feature contributions, explanations, and serving-cache readiness.
+- Keep concurrency protection for expensive writes and scoring jobs.
+- For historical backfills, use intentional manual dispatches and verify date inputs.
 
-The production architecture follows one rule:
+## 8. Audit methodology and maintenance
 
-> **One scheduled production workflow, one dependency graph, one authoritative green/red result.**
+Reviewed the top-level trigger declarations of every workflow YAML in `.github/workflows/` on the `main` branch as of October 20, 2026. Classified `schedule`, `workflow_run`, `workflow_dispatch`, and `workflow_call`, including distinguishing commented-out cron examples from active triggers. UTC-to-Eastern conversions use EDT (UTC−4) and EST (UTC−5). The inventory reflects configured triggers, not proof of successful execution or actual job start times.
 
-GitHub Actions controls workflow ordering with `needs:`.
-
-Supabase/script preflights protect data integrity.
-
-Those responsibilities should remain separate.
+**Maintenance rule:** Update this schedule inventory whenever a workflow's automatic triggers change. Re-audit before each season's shutdown and restart.
